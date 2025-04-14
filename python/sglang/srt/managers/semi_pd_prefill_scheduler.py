@@ -129,12 +129,18 @@ class SemiPDPrefillScheduler(SemiPDScheduler):
             self.send_to_d_instance.send_pyobj(req)
             resp = self.bridge_socket.recv_pyobj()
             logger.debug(f"Recv response from D worker: {resp}")
-            assert isinstance(
-                resp, GetNextPrefillBatchOutput
-            ), f"Expected GetNextPrefillBatchOutput, but got {type(resp)}"
+            assert isinstance(resp, GetNextPrefillBatchOutput), (
+                f"Expected GetNextPrefillBatchOutput, but got {type(resp)}"
+            )
 
-        if self.tp_size > 1 and not self.server_args.enable_dp_attention:
-            resp = broadcast_pyobj([resp], self.tp_rank, self.tp_cpu_group)[0]
+        if self.attn_tp_size > 1:
+            attn_tp_rank_0 = self.dp_rank * self.attn_tp_size
+            resp = broadcast_pyobj(
+                [resp],
+                self.attn_tp_rank,
+                self.attn_tp_cpu_group,
+                src=attn_tp_rank_0,
+            )[0]
 
         ret = None
         if resp and len(resp.rids) > 0:

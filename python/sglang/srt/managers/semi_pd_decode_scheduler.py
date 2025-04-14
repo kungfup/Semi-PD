@@ -17,9 +17,10 @@ import logging
 from types import SimpleNamespace
 from typing import List, Optional
 
+import numpy as np
 import torch
 import zmq
-
+import torch.distributed as dist
 from sglang.semi_pd.utils import InstanceRole
 from sglang.srt.managers.io_struct import (
     BatchProcessPrefillResultReq,
@@ -32,7 +33,7 @@ from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.semi_pd_scheduler import SemiPDScheduler
 from sglang.srt.server_args import PortArgs, SemiPDPortArgs, ServerArgs
-from sglang.srt.utils import get_bool_env_var, get_zmq_socket
+from sglang.srt.utils import broadcast_pyobj, get_bool_env_var, get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -358,11 +359,12 @@ class SemiPDDecodeScheduler(SemiPDScheduler):
             bid=-1,  # doesn't matter
         )
 
-        logger.debug(f"Process batch result prefill: {[r.rid for r in batch.reqs]}")
+        if self.attn_tp_size > 1:
+            dist.barrier(group=self.attn_tp_cpu_group)
 
-        batch.output_ids = torch.tensor(
-            result.next_token_ids, dtype=torch.int64, device=self.device
-        )
+        batch.output_ids = torch.from_numpy(
+            np.array(result.next_token_ids, dtype=np.int64)
+        ).to(self.device, dtype=torch.int64, non_blocking=True)
         self.process_batch_result_prefill(batch, result)
 
         batch.filter_batch(chunked_req_to_exclude=self.chunked_req)
