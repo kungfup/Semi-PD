@@ -28,7 +28,6 @@ class ModelCard(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "sglang"
     root: Optional[str] = None
-    max_model_len: Optional[int] = None
 
 
 class ModelList(BaseModel):
@@ -188,7 +187,7 @@ class CompletionResponseChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Literal["stop", "length", "content_filter"]
+    finish_reason: Optional[str] = None
     matched_stop: Union[None, int, str] = None
 
 
@@ -205,7 +204,7 @@ class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "content_filter"]] = None
+    finish_reason: Optional[str] = None
     matched_stop: Union[None, int, str] = None
 
 
@@ -228,25 +227,14 @@ class ChatCompletionMessageContentImageURL(BaseModel):
     detail: Optional[Literal["auto", "low", "high"]] = "auto"
 
 
-class ChatCompletionMessageContentAudioURL(BaseModel):
-    url: str
-
-
 class ChatCompletionMessageContentImagePart(BaseModel):
     type: Literal["image_url"]
     image_url: ChatCompletionMessageContentImageURL
     modalities: Optional[Literal["image", "multi-images", "video"]] = "image"
 
 
-class ChatCompletionMessageContentAudioPart(BaseModel):
-    type: Literal["audio_url"]
-    audio_url: ChatCompletionMessageContentAudioURL
-
-
 ChatCompletionMessageContentPart = Union[
-    ChatCompletionMessageContentTextPart,
-    ChatCompletionMessageContentImagePart,
-    ChatCompletionMessageContentAudioPart,
+    ChatCompletionMessageContentTextPart, ChatCompletionMessageContentImagePart
 ]
 
 
@@ -288,7 +276,6 @@ class Function(BaseModel):
     description: Optional[str] = Field(default=None, examples=[None])
     name: Optional[str] = None
     parameters: Optional[object] = None
-    strict: bool = False
 
 
 class Tool(BaseModel):
@@ -388,9 +375,7 @@ class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
-    finish_reason: Literal[
-        "stop", "length", "tool_calls", "content_filter", "function_call"
-    ]
+    finish_reason: str
     matched_stop: Union[None, int, str] = None
 
 
@@ -414,9 +399,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
-    finish_reason: Optional[
-        Literal["stop", "length", "tool_calls", "content_filter", "function_call"]
-    ] = None
+    finish_reason: Optional[str] = None
     matched_stop: Union[None, int, str] = None
 
 
