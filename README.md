@@ -9,18 +9,58 @@ This repository originally started as a fork of the SGLang project. Semi-PD is a
 
 ## Build && Install
 ```shell
-# setup the distserve conda environment
+# setup the semi-pd conda environment
 conda env create -f semi_pd -y python=3.11
 conda activate semi_pd
 
-# build IPC dependency
-cd Semi-PD/semi-pd-ipc/
-pip install -e .
+# Use the last release branch
+git clone git@github.com:infinigence/Semi-PD.git
+cd Semi-PD
+pip install --upgrade pip
 
+# build IPC dependency
+cd ./semi-pd-ipc/
+pip install -e .
+```
+### For NVIDIA GPUs
+```shell
 # build Semi-PD
 cd ..
 pip install -e "python[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
+### For AMD GPUs
+```shell
+cd ../sgl-kernel
+python setup_rocm.py install
+cd ..
+pip install -e "python[all_hip]"
+```
+
+## Using docker to build base environment
+You can follow the following steps to build the base environment, or build from [Dockerfile](https://github.com/infinigence/Semi-PD/tree/update_readme/docker).
+
+### Pull the NVIDIA image
+```shell
+docker pull lmsysorg/sglang:v0.4.4.post1-cu124
+
+docker run -it --gpus all -p 30000:30000 -v /your/path:/your/path --ipc=host --name semi_pd v0.4.4.post1-cu124:latest
+
+docker exec -it semi_pd bash
+```
+
+### Pull the AMD image
+```shell
+docker pull lmsysorg/sglang:v0.4.4.post1-rocm630
+
+docker run -it --device=/dev/kfd --device=/dev/dri --shm-size=32g -p 30000:30000 -v /your/path:/your/path --ipc=host --name semi_pd v0.4.4.post1-rocm630:latest
+
+docker exec -it semi_pd bash
+```
+
+Then you can follow the `Build && Install` section to build Semi-PD.
+
+
+
 
 ## Launching
 
@@ -49,3 +89,6 @@ python3 -m sglang.launch_server \
   --enable-semi-pd  --mem-fraction-static 0.85
 ```
 
+## Evaluation
+
+![Semi-PD](./docs/_static/image/evaluation_semi_pd.png)
