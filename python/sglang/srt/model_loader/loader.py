@@ -355,14 +355,16 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with target_device:
+            with torch.device(target_device):
                 model = _initialize_model(
                     model_config,
                     self.load_config,
                 )
 
             if not bypass_load_weight:
-                model.load_weights(self._get_all_weights(model_config, model))
+                # Load the weights from the cached files.
+                weights = self._get_all_weights(model_config, model)
+                model.load_weights(weights)
 
                 for _, module in model.named_modules():
                     quant_method = getattr(module, "quant_method", None)
@@ -374,6 +376,25 @@ class DefaultModelLoader(BaseModelLoader):
                         # parameters onto device for processing and back off after.
                         with device_loading_context(module, target_device):
                             quant_method.process_weights_after_loading(module)
+
+                # If the model defines additional post-processing logic (e.g. to
+                # statically assign member variables after the quantization
+                # passes above), invoke it here.  Newer sglang versions rely on
+                # this hook and certain FP8/kv-cache layers (such as
+                # `QKVParallelLinear`) expect it for attributing variables like
+                # `weight_scale`.  Calling it is a no-op when the method is not
+                # implemented.
+                if hasattr(model, "post_load_weights"):
+                    model.post_load_weights()
+            else:
+                logger.info(
+                    "Bypassing weight loading. Creating a shell model for IPC."
+                )
+                # The model is on the meta device, we need to move it to the
+                # target device to allocate memory. The weights will be filled
+                # later via IPC.
+                model.to_empty(device=target_device)
+
         return model.eval()
 
 

@@ -200,6 +200,9 @@ def apply_fp8_linear(
 ) -> torch.Tensor:
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
+    # 确保输入张量是连续的行主序格式
+    if not input_2d.is_contiguous() or input_2d.stride(1) != 1:
+        input_2d = input_2d.contiguous()
     output_shape = [*input.shape[:-1], weight.shape[1]]
 
     # cutlass w8a8 fp8 sgl-kernel only supports per-token scale
@@ -218,6 +221,10 @@ def apply_fp8_linear(
                 input_2d, group_size=input_2d.shape[1]
             )
 
+    # 确保量化后的输入张量是行主序格式
+    if not qinput.is_contiguous() or qinput.stride(1) != 1:
+        qinput = qinput.contiguous()
+
     if cutlass_fp8_supported:
         if use_vllm_cutlass_w8a8_fp8_kernel:
             # Fall back to vllm cutlass w8a8 fp8 kernel
@@ -233,8 +240,16 @@ def apply_fp8_linear(
             assert (
                 weight_scale.numel() == weight.shape[1]
             ), "cutlass w8a8 fp8 sgl-kernel only supports per-channel scale"
+
+            # 确保权重张量是列主序格式
+            if weight.stride(0) != 1:
+                # 如果权重不是列主序，需要转置并确保连续性
+                weight_col_major = weight.t().contiguous()
+            else:
+                weight_col_major = weight
+
             output = fp8_scaled_mm(
-                qinput, weight, x_scale, weight_scale, out_dtype=input.dtype, bias=bias
+                qinput, weight_col_major, x_scale, weight_scale, out_dtype=input.dtype, bias=bias
             )
         return output.view(*output_shape)
 

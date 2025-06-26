@@ -284,31 +284,125 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # If checkpoint is not serialized fp8, quantize them.
+        # Block quant doesn't need to process weights after loading
+        if self.block_quant:
+            # 确保 weight_scale_inv 存在
+            if not hasattr(layer, "weight_scale_inv") or layer.weight_scale_inv is None:
+                # 为 block quantization 创建占位 weight_scale_inv
+                block_n, block_k = (
+                    self.quant_config.weight_block_size[0],
+                    self.quant_config.weight_block_size[1],
+                )
+                placeholder_scale_inv = torch.ones(
+                    (layer.weight.shape[0] + block_n - 1) // block_n,
+                    (layer.weight.shape[1] + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                    device=layer.weight.device
+                )
+                layer.weight_scale_inv = torch.nn.Parameter(placeholder_scale_inv, requires_grad=False)
+
+            # If ROCm, normalize the weights and scales to e4m3fnuz
+            if _is_hip:
+                # activation_scheme: dynamic
+                weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale_inv,
+                    input_scale=None,
+                )
+                layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+                layer.weight_scale_inv = torch.nn.Parameter(
+                    weight_scale, requires_grad=False
+                )
+                layer.input_scale = None
+            else:
+                layer.weight = torch.nn.Parameter(
+                    layer.weight.data, requires_grad=False
+                )
+                layer.weight_scale_inv = torch.nn.Parameter(
+                    layer.weight_scale_inv.data, requires_grad=False
+                )
+            return
+        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+        # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
-            # The kernel requires the weight to be in [in, out] shape, but the
-            # scales to be per-output-channel.
-            # We first quantize the original weight [out, in] to get per-row
-            # (per-output-channel) scales.
-            qweight_orig_layout, weight_scale = per_token_group_quant_fp8(
-                layer.weight, group_size=layer.weight.shape[-1]
-            )
+            if self.cutlass_fp8_supported or self.use_marlin:
+                # apply per-channel quantization default, as cutlass sgl-kernel and marlin only support per-channel scale
+                qweight, weight_scale = per_token_group_quant_fp8(
+                    layer.weight, layer.weight.shape[-1]
+                )
+                weight_scale = weight_scale.t().contiguous()
+            else:
+                # per-tensor quantization
+                qweight, weight_scale = input_to_float8(layer.weight)
 
-            # Then, we transpose the quantized weight to be in the [in, out]
-            # format expected by the kernel. The kernel expects a column-major
-            # layout, which is what a simple transpose .T provides.
-            qweight = qweight_orig_layout.T
-
-            # Unregister and delete the old weight to free memory.
-            # This is critical for the resident process.
-            if hasattr(layer, "weight"):
-                del layer.weight
-
-            # Register qweight and weight_scale as buffers so they are part of the
-            # model's state_dict and can be shared via IPC.
-            layer.register_buffer("qweight", qweight)
-            layer.register_buffer("weight_scale", weight_scale)
+            # Update the layer with the new values.
+            layer.weight = Parameter(qweight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.input_scale = None
+
+        # If checkpoint is fp8, handle that there are N scales for N
+        # shards in a fused module
+        else:
+            # 确保 weight_scale 存在
+            if not hasattr(layer, "weight_scale") or layer.weight_scale is None:
+                # 创建占位 weight_scale
+                placeholder_scale = torch.ones(
+                    len(getattr(layer, "logical_widths", [layer.weight.shape[1]])),
+                    dtype=torch.float32,
+                    device=layer.weight.device
+                )
+                layer.weight_scale = torch.nn.Parameter(placeholder_scale, requires_grad=False)
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
+
+            if self.quant_config.activation_scheme == "static":
+                if hasattr(layer, "input_scale") and layer.input_scale is not None:
+                    layer.input_scale = torch.nn.Parameter(
+                        layer.input_scale.data, requires_grad=False
+                    )
+                else:
+                    # 创建占位 input_scale
+                    layer.input_scale = torch.nn.Parameter(
+                        torch.ones(1, dtype=torch.float32, device=layer.weight.device),
+                        requires_grad=False
+                    )
+
+            # cutlass sgl-kernel and marlin only support per-channel scale
+            if self.cutlass_fp8_supported or self.use_marlin:
+                weight = layer.weight
+                weight_scale = convert_to_channelwise(
+                    layer.weight_scale, getattr(layer, "logical_widths", [layer.weight.shape[1]])
+                )
+            else:
+                # Dequant -> Quant with max scale so we can run per tensor.
+                weight = layer.weight
+                weight_scale = layer.weight_scale
+                # If ROCm, normalize the weights and scales to e4m3fnuz
+                if _is_hip:
+                    weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=weight_scale,
+                        input_scale=getattr(layer, "input_scale", None),
+                    )
+                    if input_scale is not None:
+                        layer.input_scale = Parameter(input_scale, requires_grad=False)
+
+                weight_scale, weight = requantize_with_max_scale(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    logical_widths=getattr(layer, "logical_widths", [layer.weight.shape[1]]),
+                )
+
+            # Update layer with new values.
+            layer.weight = Parameter(weight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            if self.quant_config.activation_scheme == "static":
+                if hasattr(layer, "input_scale") and layer.input_scale is not None:
+                    layer.input_scale = Parameter(
+                        layer.input_scale.max(), requires_grad=False
+                    )
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
@@ -323,9 +417,17 @@ class Fp8LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
 
         if self.use_marlin:
+            # 确保 weight_scale 属性存在
+            if not hasattr(layer, "weight_scale") or layer.weight_scale is None:
+                # 为 Marlin 创建占位 weight_scale（Marlin需要per-channel scale）
+                placeholder_scale = torch.ones(
+                    layer.weight.shape[1], dtype=torch.float32, device=layer.weight.device
+                )
+                layer.weight_scale = torch.nn.Parameter(placeholder_scale, requires_grad=False)
+
             return apply_fp8_marlin_linear(
                 input=x,
-                weight=layer.qweight,
+                weight=layer.weight,
                 weight_scale=layer.weight_scale,
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
@@ -334,18 +436,48 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
+            # 若 weight_scale_inv 丢失（block quantization 需要），动态创建占位缩放因子
+            if not hasattr(layer, "weight_scale_inv") or layer.weight_scale_inv is None:
+                # 为 block quantization 生成占位 weight_scale_inv
+                block_n, block_k = (
+                    self.quant_config.weight_block_size[0],
+                    self.quant_config.weight_block_size[1],
+                )
+                placeholder_scale_inv = torch.ones(
+                    (layer.weight.shape[0] + block_n - 1) // block_n,
+                    (layer.weight.shape[1] + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                    device=layer.weight.device
+                )
+                layer.weight_scale_inv = torch.nn.Parameter(placeholder_scale_inv, requires_grad=False)
+
             return apply_w8a8_block_fp8_linear(
                 input=x,
-                weight=layer.qweight,
+                weight=layer.weight,
                 block_size=self.quant_config.weight_block_size,
-                weight_scale=layer.weight_scale,
+                weight_scale=layer.weight_scale_inv,
                 input_scale=None,
                 bias=bias,
             )
 
+        # 确保 weight_scale 存在，如果不存在则创建占位符
+        if not hasattr(layer, "weight_scale") or layer.weight_scale is None:
+            # 根据是否支持cutlass来决定weight_scale的形状
+            if self.cutlass_fp8_supported:
+                # cutlass需要per-channel scale，形状为[output_features]
+                placeholder_scale = torch.ones(layer.weight.shape[1], dtype=torch.float32, device=layer.weight.device)
+            else:
+                # 其他情况使用per-tensor scale
+                placeholder_scale = torch.ones(1, dtype=torch.float32, device=layer.weight.device)
+            layer.weight_scale = torch.nn.Parameter(placeholder_scale, requires_grad=False)
+
+        # 确保 input_scale 存在，如果不存在则设为 None
+        if not hasattr(layer, "input_scale"):
+            layer.input_scale = None
+
         return apply_fp8_linear(
             input=x,
-            weight=layer.qweight,
+            weight=layer.weight,
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,

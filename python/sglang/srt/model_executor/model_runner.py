@@ -49,7 +49,10 @@ from sglang.srt.layers.dp_attention import (
     initialize_dp_attention,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.layers.quantization import monkey_patch_isinstance_for_vllm_base_layer
+from sglang.srt.layers.quantization import (
+    Fp8LinearMethod,
+    monkey_patch_isinstance_for_vllm_base_layer,
+)
 from sglang.srt.layers.sampler import Sampler
 from sglang.srt.layers.torchao_utils import apply_torchao_config_to_model
 from sglang.srt.lora.lora_manager import LoRAManager
@@ -88,7 +91,8 @@ from sglang.srt.utils import (
     set_cpu_offload_max_bytes,
     set_cuda_arch,
 )
-
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.managers.schedule_batch import ForwardMode, Req
 logger = logging.getLogger(__name__)
 
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
@@ -479,100 +483,53 @@ class ModelRunner:
         )
 
     def share_params_from_ipc(self, ipc_info: IPCInfo):
-        # Reconstruct parameters from IPC handles
-        for name, _ in self.model.named_parameters():
-            # Get the path to the parameter
-            path = name.split(".")
+        # Clean up dangling .weight from shell model's quantized layers
+        for module in self.model.modules():
+            quant_method = getattr(module, "quant_method", None)
+            if isinstance(quant_method, Fp8LinearMethod):
+                if hasattr(module, "weight"):
+                    # This parameter does not exist in the source model.
+                    # It was replaced by qweight and weight_scale.
+                    del module.weight
 
-            # Navigate to the parent module
-            module = self.model
-            for p in path[:-1]:
-                if p.isdigit():
-                    module = module[int(p)]
-                else:
-                    module = getattr(module, p)
+        # Share tensors (parameters and buffers) based on the IPC info dict,
+        # which is the source of truth from the resident process.
+        all_tensors_info = {**ipc_info.params_info}
+        all_tensor_handles = {**ipc_info.weight_handles, **ipc_info.register_buffer_handles}
 
-            # Get the parameter name (last part of the path)
-            param_name = path[-1]
-
-            share_param_handle = ipc_info.weight_handles.get(name, None)
-            shape, dtype, device = ipc_info.params_info[name]
-            size = reduce(lambda x, y: x * y, shape)
-
-            assert (
-                share_param_handle is not None
-            ), f"Parameter {name} not found in meta_info"
-            
-            try:
-                if shape == torch.Size([0]):
-                    share_param_tensor = torch.empty(0, dtype=dtype, device=device)
-                else:
-                    share_param_tensor = convert_ipc_handle_to_tensor(
-                        share_param_handle, size, dtype, device
-                    ).view(shape)
-            except Exception as e:
-                raise NotImplementedError(f"Parameter {name, size, dtype, device} is not supported in Semi-PD")
-            
-            new_param = nn.Parameter(share_param_tensor, requires_grad=False)
-            setattr(module, param_name, new_param)
-
-        # Reconstruct registered buffers from IPC handles
-        for name, _ in self.model.named_buffers():
-            # Get the path to the parameter
-            path = name.split(".")
-
-            # Navigate to the parent module
-            module = self.model
-            for p in path[:-1]:
-                if p.isdigit():
-                    module = module[int(p)]
-                else:
-                    module = getattr(module, p)
-
-            # Get the parameter name (last part of the path)
-            buffer_name = path[-1]
-
-            share_buffer_handle = ipc_info.register_buffer_handles.get(name, None)
-            shape, dtype, device = ipc_info.params_info[name]
-
-            if shape is None:
+        for name, (shape, dtype, device) in all_tensors_info.items():
+            # Bypass empty or lora tensors
+            if "lora" in name or shape is None or shape == torch.Size([0]):
                 continue
-            assert (
-                share_buffer_handle is not None
-            ), f"Buffer {name} not found in meta_info"
 
-            # Shape can be [] when the buffer represents a scalar
-            size = reduce(lambda x, y: x * y, shape) if shape else 1
-            # For deepseek model
-            if "w_kc" in name or "w_vc" in name:
-                shape = [shape[0], shape[2], shape[1]]
-                share_buffer_tensor = (
-                    convert_ipc_handle_to_tensor(
-                        share_buffer_handle, size, dtype, device
-                    )
-                    .view(shape)
-                    .transpose(1, 2)
-                )
+            # Get the shared tensor from the IPC handle
+            size = reduce(lambda x, y: x * y, shape)
+            shared_tensor = convert_ipc_handle_to_tensor(
+                all_tensor_handles[name], size, dtype, device
+            )
+
+            # Handle model-specific workarounds from the original code
+            if "w_kc" in name or "w_vc" in name: # For deepseek model
+                new_shape = [shape[0], shape[2], shape[1]]
+                shared_tensor = shared_tensor.view(new_shape).transpose(1, 2)
             else:
-                share_buffer_tensor = convert_ipc_handle_to_tensor(
-                    share_buffer_handle, size, dtype, device
-                ).view(shape)
-            module.register_buffer(buffer_name, share_buffer_tensor, persistent=False)
-            # setattr(module, buffer_name, share_buffer_tensor)
+                shared_tensor = shared_tensor.view(shape)
 
-        # Reconstruct req_to_token from IPC handles
-        req_to_token_shape = ipc_info.req_to_token_info["req_to_token_shape"]
-        req_to_token_dtype = ipc_info.req_to_token_info["req_to_token_dtype"]
-        req_to_token_device = ipc_info.req_to_token_info["req_to_token_device"]
-        size = reduce(lambda x, y: x * y, req_to_token_shape)
-        self.req_to_token_pool.req_to_token = convert_ipc_handle_to_tensor(
-            ipc_info.req_to_token_handle[0],
-            size,
-            req_to_token_dtype,
-            req_to_token_device,
-        ).view(req_to_token_shape)
+            # Find the parent module in the shell model
+            module_path, tensor_name = name.rsplit(".", 1)
+            parent_module = self.model.get_submodule(module_path)
 
-        # Reconstruct kv cache from IPC handles
+            # Get the old tensor from the shell model (if it exists).
+            old_tensor = getattr(parent_module, tensor_name, None)
+
+            if isinstance(old_tensor, torch.nn.Parameter):
+                # If a parameter with the same name exists, replace its data.
+                old_tensor.data = shared_tensor
+            else:
+                # If it's a buffer or doesn't exist (like our new qweight), set it.
+                setattr(parent_module, tensor_name, shared_tensor)
+
+        # Reconstruct KV Cache from IPC handles
         if isinstance(self.token_to_kv_pool, MHATokenToKVPool):
             k_buffer = []
             v_buffer = []
@@ -660,7 +617,9 @@ class ModelRunner:
         monkey_patch_vllm_parallel_state()
         monkey_patch_isinstance_for_vllm_base_layer()
 
-        with self.memory_saver_adapter.region():
+        with self.memory_saver_adapter.region(), set_default_torch_dtype(
+            self.model_config.dtype
+        ):
             device_config = (
                 DeviceConfig(self.device)
                 if not self.bypass_load_weight
