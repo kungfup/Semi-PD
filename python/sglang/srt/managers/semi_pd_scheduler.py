@@ -9,6 +9,7 @@ from typing import Optional
 
 import psutil
 import setproctitle
+import traceback
 
 from sglang.semi_pd.utils import InstanceRole
 from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
@@ -427,6 +428,6 @@ def run_scheduler_process(
             scheduler.event_loop_normal()
 
     except Exception:
-        traceback = get_exception_traceback()
-        logger.error(f"Scheduler hit an exception: {traceback}")
+        msg = f"Scheduler hit an exception: {traceback.format_exc()}"
+        print(msg)
         parent_process.send_signal(signal.SIGQUIT)

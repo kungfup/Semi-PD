@@ -67,6 +67,11 @@ class Qwen2MLP(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("gate_up_proj", prefix),
         )
+        if quant_config is not None:
+            self.gate_up_proj.weight.data = self.gate_up_proj.weight.data.to(
+                torch.float8_e4m3fn
+            )
+
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -74,6 +79,11 @@ class Qwen2MLP(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("down_proj", prefix),
         )
+        if quant_config is not None:
+            self.down_proj.weight.data = self.down_proj.weight.data.to(
+                torch.float8_e4m3fn
+            )
+
         if hidden_act != "silu":
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. "
@@ -133,6 +143,11 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
         )
+        if quant_config is not None:
+            self.qkv_proj.weight.data = self.qkv_proj.weight.data.to(
+                torch.float8_e4m3fn
+            )
+
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -140,6 +155,8 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )
+        if quant_config is not None:
+            self.o_proj.weight.data = self.o_proj.weight.data.to(torch.float8_e4m3fn)
 
         self.rotary_emb = get_rope(
             self.head_dim,

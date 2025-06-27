@@ -93,6 +93,13 @@ from sglang.srt.utils import (
 )
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.managers.schedule_batch import ForwardMode, Req
+from sglang.srt.managers.io_struct import BatchTokenIDOut, ReqToTokenPool, FinishReason
+from sglang.srt.model_executor.model_infer_worker import ModelInferWorker
+from sglang.srt.model_executor.model_loader import get_model
+from sglang.srt.model_loader.weight_utils import load_lora_weights
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_int_token_logit_bias, Poll, get_exception_traceback, BFloat16, Float16
+
 logger = logging.getLogger(__name__)
 
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
@@ -524,6 +531,13 @@ class ModelRunner:
 
             if isinstance(old_tensor, torch.nn.Parameter):
                 # If a parameter with the same name exists, replace its data.
+                if old_tensor.dtype != shared_tensor.dtype:
+                    logger.error(
+                        f"!!! DTYPE MISMATCH !!!\n"
+                        f"Parameter name: {name}\n"
+                        f"Shell model dtype (old_tensor): {old_tensor.dtype}\n"
+                        f"Loaded model dtype (shared_tensor): {shared_tensor.dtype}"
+                    )
                 old_tensor.data = shared_tensor
             else:
                 # If it's a buffer or doesn't exist (like our new qweight), set it.

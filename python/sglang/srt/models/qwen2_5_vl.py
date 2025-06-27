@@ -731,5 +731,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 weight_loader(param, loaded_weight)
 
 
-EntryClass = [Qwen2_5_VLForConditionalGeneration]
-AutoModel.register(Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration)
+def get_model_cls(config: Qwen2_5_VLConfig) -> Type[Qwen2_5_VLForConditionalGeneration]:
+    return Qwen2_5_VLForConditionalGeneration
+
+
+# AutoModel.register(Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration)

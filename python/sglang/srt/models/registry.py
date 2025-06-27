@@ -8,6 +8,14 @@ from functools import lru_cache
 from typing import AbstractSet, Dict, List, Optional, Tuple, Type, Union
 
 import torch.nn as nn
+# from sglang.srt.models.qwen2 import Qwen2ForCausalLM, Qwen2ForCausalLMEagle
+# from sglang.srt.models.qwen2_moe import Qwen2MoeForCausalLM
+# from sglang.srt.models.qwen2_reward import Qwen2ForRewardModel
+# from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
+from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+# from sglang.srt.models.stablelm import StableLmForCausalLM
+# from sglang.srt.models.torch_native_llama import TorchNativeLlamaForCausalLM
+# from sglang.srt.models.torch_native_phi3 import TorchNativePhi3ForCausalLM
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +100,9 @@ def import_model_classes():
                         entry.__name__ not in model_arch_name_to_cls
                     ), f"Duplicated model implementation for {entry.__name__}"
                     model_arch_name_to_cls[entry.__name__] = entry
+
+    # Manually register Qwen2_5_VLForConditionalGeneration to avoid import issues
+    model_arch_name_to_cls["Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 
     return model_arch_name_to_cls
 

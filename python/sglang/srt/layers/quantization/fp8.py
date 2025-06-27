@@ -134,11 +134,19 @@ class Fp8Config(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
+        from sglang.srt.layers.vocab_parallel_embedding import (
+            UnquantizedEmbeddingMethod,
+            VocabParallelEmbedding,
+        )
 
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
+        if isinstance(layer, VocabParallelEmbedding):
+            if is_layer_skipped(prefix, self.ignored_layers):
+                return UnquantizedEmbeddingMethod()
+            return Fp8EmbeddingMethod(self)
         elif isinstance(layer, FusedMoE):
             return Fp8MoEMethod(self)
         elif isinstance(layer, Attention):
@@ -354,6 +362,57 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
 
+class Fp8EmbeddingMethod(QuantizeMethodBase):
+    """Embedding method for FP8.
+    It dequantizes the weight to bfloat16 before the embedding lookup.
+    """
+
+    def __init__(self, quant_config: Fp8Config):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create weights for embedding layer."""
+        weight_dtype = (
+            torch.float8_e4m3fn
+            if self.quant_config.is_checkpoint_fp8_serialized
+            else params_dtype
+        )
+        weight = Parameter(
+            torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Not a linear layer, apply is not used.
+        raise NotImplementedError
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        # Dequantize the weight to bfloat16 before the lookup
+        dequantized_weight = layer.weight.to(torch.bfloat16)
+        return F.embedding(input_, dequantized_weight)
+
+
 class Fp8MoEMethod:
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -368,7 +427,7 @@ class Fp8MoEMethod:
     """
 
     def __new__(cls, *args, **kwargs):
-        from sglang.srt.layers.moe.fused_moe_triton import FusedMoEMethodBase
+        from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
 
         if not hasattr(cls, "_initialized"):
             original_init = cls.__init__
