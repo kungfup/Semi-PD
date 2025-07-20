@@ -510,10 +510,13 @@ def v1_generate_request(
             current_logprob_start_len = 0
         else:
             current_logprob_start_len = -1
+        # Set default max_tokens if not provided to prevent infinite generation
+        max_tokens = request.max_tokens if request.max_tokens is not None else 512
+
         sampling_params_list.append(
             {
                 "temperature": request.temperature,
-                "max_new_tokens": request.max_tokens,
+                "max_new_tokens": max_tokens,
                 "min_new_tokens": request.min_tokens,
                 "stop": request.stop,
                 "stop_token_ids": request.stop_token_ids,
@@ -965,9 +968,12 @@ def v1_chat_generate_request(
         top_logprobs_nums.append(request.top_logprobs or 0)
         lora_paths.append(request.lora_path)
 
+        # Set default max_tokens if not provided to prevent infinite generation
+        max_tokens = request.max_tokens if request.max_tokens is not None else 512
+
         sampling_params = {
             "temperature": request.temperature,
-            "max_new_tokens": request.max_tokens,
+            "max_new_tokens": max_tokens,
             "min_new_tokens": request.min_tokens,
             "stop": stop,
             "stop_token_ids": request.stop_token_ids,

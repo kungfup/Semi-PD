@@ -705,15 +705,35 @@ def _launch_semi_pd_subprocesses(
             )
         return None, None
 
-    # Launch detokenizer process
+    # Launch detokenizer process with pipe for ready signal
+    detoken_reader, detoken_writer = mp.Pipe(duplex=False)
     detoken_proc = mp.Process(
         target=run_detokenizer_process,
         args=(
             server_args,
             port_args,
+            detoken_writer,  # Pass pipe_writer for ready signal
         ),
     )
     detoken_proc.start()
+
+    # Wait for detokenizer to be ready
+    logger.info("Waiting for Detokenizer to be ready...")
+    try:
+        if detoken_reader.poll(60):  # 60 seconds timeout for L20
+            detoken_data = detoken_reader.recv()
+            logger.info(f"🔧 [ENGINE] Received data from detokenizer: {detoken_data}")
+            if detoken_data["status"] == "ready":
+                logger.info("✅ Detokenizer is ready")
+            else:
+                logger.error(f"❌ Detokenizer failed to start: {detoken_data}")
+                raise RuntimeError("Detokenizer initialization failed")
+        else:
+            logger.error("❌ Timeout waiting for Detokenizer ready signal after 60 seconds")
+            raise RuntimeError("Detokenizer ready timeout")
+    except Exception as e:
+        logger.error(f"❌ Error waiting for Detokenizer: {e}")
+        raise
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)

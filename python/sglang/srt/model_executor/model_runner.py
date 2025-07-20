@@ -480,6 +480,29 @@ class ModelRunner:
 
     def share_params_from_ipc(self, ipc_info: IPCInfo):
         # Reconstruct parameters from IPC handles
+        logger.info("🔍 [ORIGINAL SEMI-PD] Starting parameter sharing from IPC...")
+
+        # 🔍 VERIFY: Count parameters before sharing
+        param_count_before = sum(1 for _ in self.model.named_parameters())
+        logger.info(f"🔍 [ORIGINAL SEMI-PD] Parameters before IPC sharing: {param_count_before}")
+
+        # 🔍 VERIFY: Check some parameter checksums before sharing
+        self._checksums_before = {}
+        param_count = 0
+        for name, param in self.model.named_parameters():
+            if param_count >= 3:  # Only check first 3 parameters
+                break
+            if param.numel() > 0 and not param.is_meta:  # Skip meta tensors
+                try:
+                    checksum = torch.sum(param.data).item()
+                    data_ptr = param.data.data_ptr()
+                    self._checksums_before[name] = {'checksum': checksum, 'data_ptr': data_ptr}
+                    logger.info(f"🔍 [ORIGINAL SEMI-PD] BEFORE - {name}: checksum={checksum:.6f}, ptr=0x{data_ptr:x}")
+                    param_count += 1
+                except Exception as e:
+                    logger.info(f"🔍 [ORIGINAL SEMI-PD] BEFORE - {name}: meta tensor (no data yet)")
+                    self._checksums_before[name] = {'checksum': None, 'data_ptr': None, 'is_meta': True}
+
         for name, _ in self.model.named_parameters():
             # Get the path to the parameter
             path = name.split(".")
@@ -622,6 +645,45 @@ class ModelRunner:
             req_to_token_device,
         ).view(req_to_token_shape)
         self.req_to_token_pool.req_to_token = req_to_token_tensor
+
+        # 🔍 VERIFY: Check parameter checksums after sharing
+        logger.info("🔍 [ORIGINAL SEMI-PD] Parameter sharing completed, verifying results...")
+
+        checksums_after = {}
+        param_count = 0
+        for name, param in self.model.named_parameters():
+            if param_count >= 3:  # Only check first 3 parameters
+                break
+            if param.numel() > 0 and not param.is_meta:  # Skip meta tensors
+                try:
+                    checksum = torch.sum(param.data).item()
+                    data_ptr = param.data.data_ptr()
+                    checksums_after[name] = {'checksum': checksum, 'data_ptr': data_ptr}
+                    logger.info(f"🔍 [ORIGINAL SEMI-PD] AFTER - {name}: checksum={checksum:.6f}, ptr=0x{data_ptr:x}")
+                    param_count += 1
+                except Exception as e:
+                    logger.warning(f"🔍 [ORIGINAL SEMI-PD] AFTER - {name}: Failed to get checksum: {e}")
+                    checksums_after[name] = {'checksum': None, 'data_ptr': None, 'error': str(e)}
+
+        # 🔍 VERIFY: Compare before and after (if checksums_before exists)
+        if hasattr(self, '_checksums_before'):
+            for name in self._checksums_before:
+                if name in checksums_after:
+                    before = self._checksums_before[name]
+                    after = checksums_after[name]
+
+                    if before['data_ptr'] != after['data_ptr']:
+                        logger.info(f"✅ [ORIGINAL SEMI-PD] {name}: Memory pointer changed (IPC sharing worked)")
+                        logger.info(f"✅ [ORIGINAL SEMI-PD] {name}: Before ptr=0x{before['data_ptr']:x}, After ptr=0x{after['data_ptr']:x}")
+                    else:
+                        logger.warning(f"⚠️  [ORIGINAL SEMI-PD] {name}: Memory pointer unchanged (IPC sharing may have failed)")
+
+                    if abs(before['checksum'] - after['checksum']) < 1e-6:
+                        logger.info(f"✅ [ORIGINAL SEMI-PD] {name}: Checksum preserved (data integrity maintained)")
+                    else:
+                        logger.warning(f"⚠️  [ORIGINAL SEMI-PD] {name}: Checksum changed! Before={before['checksum']:.6f}, After={after['checksum']:.6f}")
+
+        logger.info("🔍 [ORIGINAL SEMI-PD] Parameter sharing verification completed!")
 
     def load_model(self):
         if not self.bypass_load_weight:

@@ -3,7 +3,35 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List
 
-import semi_pd_ipc
+try:
+    import semi_pd_ipc
+    print("🔍 [ORIGINAL SEMI-PD] ✅ semi_pd_ipc imported successfully")
+    print(f"🔍 [ORIGINAL SEMI-PD] semi_pd_ipc functions: {dir(semi_pd_ipc)}")
+    SEMI_PD_IPC_AVAILABLE = True
+except ImportError as e:
+    print(f"🔍 [ORIGINAL SEMI-PD] ❌ semi_pd_ipc import failed: {e}")
+    print("🔍 [ORIGINAL SEMI-PD] 🤔 But maybe Semi-PD uses a different mechanism?")
+    SEMI_PD_IPC_AVAILABLE = False
+
+    # Create a mock semi_pd_ipc for testing
+    class MockSemiPdIpc:
+        @staticmethod
+        def get_ipc_handle(tensor):
+            print(f"🔍 [ORIGINAL SEMI-PD] 🚫 MockSemiPdIpc.get_ipc_handle called for tensor {tensor.shape}")
+            return tensor.data_ptr()
+
+        @staticmethod
+        def convert_ipc_handle_to_tensor(ipc_handle, size, dtype_str, device):
+            print(f"🔍 [ORIGINAL SEMI-PD] 🚫 MockSemiPdIpc.convert_ipc_handle_to_tensor called")
+            print(f"🔍 [ORIGINAL SEMI-PD] 🚫 This should NOT be called if Semi-PD uses a different mechanism!")
+            raise RuntimeError("MockSemiPdIpc should not be used!")
+
+        @staticmethod
+        def get_device_sm_count(device_id):
+            return 108
+
+    semi_pd_ipc = MockSemiPdIpc()
+
 import torch
 import zmq
 
